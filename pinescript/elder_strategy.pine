@@ -1,0 +1,439 @@
+// This strategy is an implementation of Elder Santis's Supply & Demand + Order Flow methodology
+// Based on comprehensive research of his YouTube channel and trading education materials
+//@version=6
+strategy("Elder's One & Done - S&D Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=2, initial_capital=50000, commission_type=strategy.commission.per_trade, commission_value=4.0, slippage=2)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUT PARAMETERS
+// ═══════════════════════════════════════════════════════════════
+
+// Strategy Settings
+one_trade_per_day = input.bool(true, "One Trade Per Day (One & Done)", group="Strategy Rules")
+show_zones = input.bool(true, "Show S&D Zones", group="Display")
+show_structure = input.bool(true, "Show Market Structure", group="Display")
+show_volume_analysis = input.bool(true, "Show Volume Analysis", group="Display")
+show_backtest_table = input.bool(true, "Show Backtest Results", group="Display")
+
+// Zone Detection Parameters
+zone_lookback = input.int(20, "Zone Detection Lookback", minval=10, maxval=100, group="Zone Detection")
+explosive_move_threshold = input.float(1.5, "Explosive Move Threshold (ATR multiplier)", minval=1.0, maxval=3.0, group="Zone Detection")
+consolidation_threshold = input.float(0.3, "Consolidation Threshold (ATR multiplier)", minval=0.1, maxval=1.0, group="Zone Detection")
+
+// Volume Analysis
+volume_ma_length = input.int(20, "Volume MA Length", minval=5, maxval=50, group="Volume Analysis")
+cvd_source = input.string("Close", "CVD Source", options=["Close", "OHLC4"], group="Volume Analysis")
+
+// Risk Management
+risk_per_trade = input.float(2.0, "Risk Per Trade (%)", minval=0.5, maxval=5.0, group="Risk Management")
+sl_buffer = input.float(0.1, "Stop Loss Buffer (%)", minval=0.0, maxval=1.0, group="Risk Management")
+tp_mode = input.string("VWAP", "Take Profit Mode", options=["VWAP", "2:1 R:R", "3:1 R:R"], group="Risk Management")
+
+// Trend Filter
+trend_lookback = input.int(50, "Trend Lookback (4H equivalent)", minval=20, maxval=200, group="Trend Filter")
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Calculate ATR for explosive move detection
+atr = ta.atr(14)
+
+// VWAP calculation
+vwap = ta.vwap(close)
+
+// Volume analysis
+volume_ma = ta.sma(volume, volume_ma_length)
+volume_spike = volume > volume_ma * 1.5
+
+// Cumulative Volume Delta approximation (since we don't have tick data)
+cvd_source_val = switch cvd_source
+    "Close" => close
+    "OHLC4" => ohlc4
+    => close
+
+// Approximate CVD using price-volume relationship
+price_volume_delta = (close > open ? volume : -volume)
+cvd = ta.cum(price_volume_delta)
+cvd_ma = ta.sma(cvd, 20)
+
+// ═══════════════════════════════════════════════════════════════
+// TREND ANALYSIS (4H EQUIVALENT)
+// ═══════════════════════════════════════════════════════════════
+
+// Higher timeframe trend analysis
+htf_high = ta.highest(high, trend_lookback)
+htf_low = ta.lowest(low, trend_lookback)
+
+// Swing detection
+swing_high = ta.pivothigh(high, 5, 5)
+swing_low = ta.pivotlow(low, 5, 5)
+
+// Track higher highs, higher lows, lower highs, lower lows
+var float last_swing_high = na
+var float last_swing_low = na
+var int trend_direction = 0  // 1 = bullish, -1 = bearish, 0 = range
+
+if not na(swing_high)
+    if na(last_swing_high) or swing_high > last_swing_high
+        last_swing_high := swing_high
+    else
+        // Lower high detected
+        if trend_direction == 1
+            trend_direction := 0  // Trend weakening
+
+if not na(swing_low)
+    if na(last_swing_low) or swing_low < last_swing_low
+        last_swing_low := swing_low
+    else
+        // Higher low detected
+        if trend_direction == -1
+            trend_direction := 0  // Trend weakening
+
+// Determine overall trend
+if not na(last_swing_high) and not na(last_swing_low)
+    if close > ta.ema(close, 50) and low > ta.lowest(low, 20)[10]
+        trend_direction := 1  // Bullish
+    else if close < ta.ema(close, 50) and high < ta.highest(high, 20)[10]
+        trend_direction := -1  // Bearish
+    else
+        trend_direction := 0  // Range/neutral
+
+// ═══════════════════════════════════════════════════════════════
+// SUPPLY & DEMAND ZONE DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+// Function to detect consolidation candles
+is_consolidation_candle(i) =>
+    candle_range = high[i] - low[i]
+    candle_range < atr[i] * consolidation_threshold
+
+// Function to detect explosive moves
+is_explosive_move(i) =>
+    candle_range = high[i] - low[i]
+    candle_range > atr[i] * explosive_move_threshold
+
+// Supply zone detection (Rally-Base-Drop pattern)
+var box[] supply_zones = array.new<box>()
+var line[] supply_zone_lines = array.new<line>()
+
+// Demand zone detection (Drop-Base-Rally pattern)
+var box[] demand_zones = array.new<box>()
+var line[] demand_zone_lines = array.new<line>()
+
+// Function to create supply zone
+create_supply_zone(base_start, base_end, zone_top, zone_bottom) =>
+    if show_zones
+        zone_box = box.new(
+            left=base_start,
+            top=zone_top,
+            right=bar_index + 20,
+            bottom=zone_bottom,
+            bgcolor=color.new(color.red, 85),
+            border_color=color.red,
+            border_width=1
+        )
+        array.push(supply_zones, zone_box)
+
+        zone_line = line.new(
+            x1=base_start,
+            y1=(zone_top + zone_bottom) / 2,
+            x2=bar_index + 20,
+            y2=(zone_top + zone_bottom) / 2,
+            color=color.red,
+            width=1,
+            style=line.style_dashed
+        )
+        array.push(supply_zone_lines, zone_line)
+
+// Function to create demand zone
+create_demand_zone(base_start, base_end, zone_top, zone_bottom) =>
+    if show_zones
+        zone_box = box.new(
+            left=base_start,
+            top=zone_top,
+            right=bar_index + 20,
+            bottom=zone_bottom,
+            bgcolor=color.new(color.green, 85),
+            border_color=color.green,
+            border_width=1
+        )
+        array.push(demand_zones, zone_box)
+
+        zone_line = line.new(
+            x1=base_start,
+            y1=(zone_top + zone_bottom) / 2,
+            x2=bar_index + 20,
+            y2=(zone_top + zone_bottom) / 2,
+            color=color.green,
+            width=1,
+            style=line.style_dashed
+        )
+        array.push(demand_zone_lines, zone_line)
+
+// Zone detection logic
+if barstate.isconfirmed and bar_index > zone_lookback + 10
+    // Look for supply zones (Rally-Base-Drop)
+    var int base_start = na
+    var int base_end = na
+    var bool in_consolidation = false
+    var bool found_rally = false
+
+    // Check for explosive move up (rally)
+    if is_explosive_move(2) and close[2] > open[2]
+        found_rally := true
+        in_consolidation := false
+        base_start := na
+
+    // Check for consolidation after rally
+    if found_rally and is_consolidation_candle(1)
+        if not in_consolidation
+            base_start := bar_index - 1
+            in_consolidation := true
+
+    // Check for explosive move down (drop) after consolidation
+    if in_consolidation and is_explosive_move(0) and close < open and not na(base_start)
+        base_end := bar_index - 1
+        // Calculate zone boundaries (supply zone rules from Elder)
+        zone_top = ta.highest(high, base_end - base_start + 1)[1]  // Top wick of consolidation
+        zone_bottom = ta.lowest(high, base_end - base_start + 1)[1] // Bottom body of consolidation (highest close/open)
+        create_supply_zone(base_start, base_end, zone_top, zone_bottom)
+
+        // Reset
+        found_rally := false
+        in_consolidation := false
+        base_start := na
+
+    // Look for demand zones (Drop-Base-Rally)
+    var bool found_drop = false
+
+    // Check for explosive move down (drop)
+    if is_explosive_move(2) and close[2] < open[2]
+        found_drop := true
+        in_consolidation := false
+        base_start := na
+
+    // Check for consolidation after drop
+    if found_drop and is_consolidation_candle(1)
+        if not in_consolidation
+            base_start := bar_index - 1
+            in_consolidation := true
+
+    // Check for explosive move up (rally) after consolidation
+    if in_consolidation and is_explosive_move(0) and close > open and not na(base_start)
+        base_end := bar_index - 1
+        // Calculate zone boundaries (demand zone rules from Elder)
+        zone_bottom = ta.lowest(low, base_end - base_start + 1)[1]  // Bottom wick of consolidation
+        zone_top = ta.highest(low, base_end - base_start + 1)[1]    // Top body of consolidation (lowest close/open)
+        create_demand_zone(base_start, base_end, zone_top, zone_bottom)
+
+        // Reset
+        found_drop := false
+        in_consolidation := false
+        base_start := na
+
+// ═══════════════════════════════════════════════════════════════
+// STRUCTURE SHIFT DETECTION (5M EQUIVALENT)
+// ═══════════════════════════════════════════════════════════════
+
+// Recent swing points for structure shift
+recent_swing_high = ta.valuewhen(swing_high, high, 0)
+recent_swing_low = ta.valuewhen(swing_low, low, 0)
+
+// Structure shift signals
+bullish_structure_shift = close > recent_swing_high and low > ta.valuewhen(swing_low, low, 1)
+bearish_structure_shift = close < recent_swing_low and high < ta.valuewhen(swing_high, high, 1)
+
+// Plot structure shift signals
+plotshape(show_structure and bullish_structure_shift, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Bullish Structure Shift")
+plotshape(show_structure and bearish_structure_shift, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Bearish Structure Shift")
+
+// ═══════════════════════════════════════════════════════════════
+// VOLUME ANALYSIS & ABSORPTION DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+// Volume trend analysis
+volume_increasing = volume > volume[1] and volume[1] > volume[2]
+volume_decreasing = volume < volume[1] and volume[1] < volume[2]
+
+// CVD divergence (absorption proxy)
+price_making_new_high = high > ta.highest(high, 10)[1]
+price_making_new_low = low < ta.lowest(low, 10)[1]
+
+cvd_making_new_high = cvd > ta.highest(cvd, 10)[1]
+cvd_making_new_low = cvd < ta.lowest(cvd, 10)[1]
+
+// Bearish divergence (bullish absorption)
+bullish_absorption = price_making_new_low and not cvd_making_new_low
+// Bullish divergence (bearish absorption)
+bearish_absorption = price_making_new_high and not cvd_making_new_high
+
+// Plot absorption signals
+plotshape(show_volume_analysis and bullish_absorption, style=shape.circle, location=location.belowbar, color=color.blue, size=size.tiny, title="Bullish Absorption")
+plotshape(show_volume_analysis and bearish_absorption, style=shape.circle, location=location.abovebar, color=color.orange, size=size.tiny, title="Bearish Absorption")
+
+// ═══════════════════════════════════════════════════════════════
+// A+ SETUP DETECTION & ENTRY SIGNALS
+// ═══════════════════════════════════════════════════════════════
+
+// Check if price is in a supply or demand zone
+in_supply_zone = false
+in_demand_zone = false
+
+// Simple zone proximity check (can be enhanced)
+near_recent_high = high >= ta.highest(high, 20) * 0.995
+near_recent_low = low <= ta.lowest(low, 20) * 1.005
+
+in_supply_zone := near_recent_high
+in_demand_zone := near_recent_low
+
+// A+ Long Setup Conditions
+long_trend_ok = trend_direction == 1  // 4H bullish trend
+long_zone = in_demand_zone           // At demand zone
+long_structure = bullish_structure_shift  // 5M structure shift bullish
+long_volume = volume_decreasing or bullish_absorption  // Volume confirmation
+long_no_news = true  // Placeholder for news filter
+
+a_plus_long = long_trend_ok and long_zone and long_structure and long_volume and long_no_news
+
+// A+ Short Setup Conditions
+short_trend_ok = trend_direction == -1  // 4H bearish trend
+short_zone = in_supply_zone            // At supply zone
+short_structure = bearish_structure_shift  // 5M structure shift bearish
+short_volume = volume_decreasing or bearish_absorption  // Volume confirmation
+short_no_news = true  // Placeholder for news filter
+
+a_plus_short = short_trend_ok and short_zone and short_structure and short_volume and short_no_news
+
+// ═══════════════════════════════════════════════════════════════
+// ONE & DONE ENFORCEMENT
+// ═══════════════════════════════════════════════════════════════
+
+// Track if we've already traded today
+var bool traded_today = false
+
+// Reset daily flag
+if ta.change(time("1D"))
+    traded_today := false
+
+// Only allow entry if we haven't traded today (One & Done)
+can_enter = not one_trade_per_day or not traded_today
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Long entry
+long_entry = a_plus_long and can_enter and strategy.position_size == 0
+if long_entry
+    stop_level = recent_swing_low * (1 - sl_buffer / 100)
+
+    target_level = switch tp_mode
+        "VWAP" => vwap
+        "2:1 R:R" => close + (close - stop_level) * 2
+        "3:1 R:R" => close + (close - stop_level) * 3
+        => vwap
+
+    // Position sizing based on risk per trade
+    risk_amount = strategy.equity * risk_per_trade / 100
+    stop_distance = close - stop_level
+    position_size = risk_amount / stop_distance
+
+    strategy.entry("Long", strategy.long, qty=position_size)
+    strategy.exit("Long Exit", "Long", stop=stop_level, limit=target_level)
+
+    traded_today := true
+
+// Short entry
+short_entry = a_plus_short and can_enter and strategy.position_size == 0
+if short_entry
+    stop_level = recent_swing_high * (1 + sl_buffer / 100)
+
+    target_level = switch tp_mode
+        "VWAP" => vwap
+        "2:1 R:R" => close - (stop_level - close) * 2
+        "3:1 R:R" => close - (stop_level - close) * 3
+        => vwap
+
+    // Position sizing based on risk per trade
+    risk_amount = strategy.equity * risk_per_trade / 100
+    stop_distance = stop_level - close
+    position_size = risk_amount / stop_distance
+
+    strategy.entry("Short", strategy.short, qty=position_size)
+    strategy.exit("Short Exit", "Short", stop=stop_level, limit=target_level)
+
+    traded_today := true
+
+// ═══════════════════════════════════════════════════════════════
+// ZONE INVALIDATION (30M CLOSE THROUGH ZONE)
+// ═══════════════════════════════════════════════════════════════
+
+// Close any position if zone is invalidated (simplified)
+// In live trading, would track specific zones and invalidate them individually
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTTING & VISUALIZATION
+// ═══════════════════════════════════════════════════════════════
+
+// Plot VWAP
+plot(vwap, color=color.yellow, linewidth=2, title="VWAP")
+
+// Plot trend background
+bgcolor(trend_direction == 1 ? color.new(color.green, 95) : trend_direction == -1 ? color.new(color.red, 95) : na, title="Trend Background")
+
+// Plot entry signals
+plotshape(long_entry, style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.normal, title="Long Entry")
+plotshape(short_entry, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.normal, title="Short Entry")
+
+// Plot volume
+plot(show_volume_analysis ? volume : na, color=color.blue, style=plot.style_histogram, histbase=0, title="Volume")
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST RESULTS TABLE
+// ═══════════════════════════════════════════════════════════════
+
+if show_backtest_table and barstate.islast
+    var table results_table = table.new(position.top_right, 2, 8, bgcolor=color.white, border_width=1)
+
+    total_trades = strategy.closedtrades
+    winning_trades = strategy.wintrades
+    losing_trades = strategy.losstrades
+
+    win_rate = total_trades > 0 ? winning_trades / total_trades * 100 : 0
+    profit_factor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0
+    avg_trade = total_trades > 0 ? strategy.netprofit / total_trades : 0
+    max_dd = strategy.max_drawdown
+
+    table.cell(results_table, 0, 0, "Elder's One & Done Results", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+    table.cell(results_table, 1, 0, "", bgcolor=color.gray)
+
+    table.cell(results_table, 0, 1, "Total Trades", text_size=size.small)
+    table.cell(results_table, 1, 1, str.tostring(total_trades), text_size=size.small)
+
+    table.cell(results_table, 0, 2, "Win Rate", text_size=size.small)
+    table.cell(results_table, 1, 2, str.tostring(win_rate, "#.##") + "%", text_color=win_rate >= 60 ? color.green : win_rate >= 40 ? color.orange : color.red, text_size=size.small)
+
+    table.cell(results_table, 0, 3, "Profit Factor", text_size=size.small)
+    table.cell(results_table, 1, 3, str.tostring(profit_factor, "#.##"), text_color=profit_factor >= 1.5 ? color.green : profit_factor >= 1.0 ? color.orange : color.red, text_size=size.small)
+
+    table.cell(results_table, 0, 4, "Avg Trade", text_size=size.small)
+    table.cell(results_table, 1, 4, "$" + str.tostring(avg_trade, "#.##"), text_color=avg_trade > 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(results_table, 0, 5, "Max Drawdown", text_size=size.small)
+    table.cell(results_table, 1, 5, "$" + str.tostring(max_dd, "#.##"), text_color=color.red, text_size=size.small)
+
+    table.cell(results_table, 0, 6, "Net Profit", text_size=size.small)
+    table.cell(results_table, 1, 6, "$" + str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit > 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(results_table, 0, 7, "One & Done ✓", text_size=size.small)
+    table.cell(results_table, 1, 7, one_trade_per_day ? "ACTIVE" : "OFF", text_color=one_trade_per_day ? color.green : color.orange, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+
+// Alert conditions
+alertcondition(long_entry, title="A+ Long Setup", message="Elder's A+ Long setup detected - Trend: Bullish, Zone: Demand, Structure: Shifted Bullish, Volume: Confirmed")
+alertcondition(short_entry, title="A+ Short Setup", message="Elder's A+ Short setup detected - Trend: Bearish, Zone: Supply, Structure: Shifted Bearish, Volume: Confirmed")
+alertcondition(bullish_absorption, title="Bullish Absorption", message="Bullish absorption detected - Price making new lows but CVD not confirming")
+alertcondition(bearish_absorption, title="Bearish Absorption", message="Bearish absorption detected - Price making new highs but CVD not confirming")
