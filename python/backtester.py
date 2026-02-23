@@ -22,6 +22,9 @@ from datetime import datetime, timedelta
 import warnings
 import json
 import os
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 try:
     from .zone_detector import ZoneDetector, SupplyDemandZone, ZoneType, ZoneStrength
@@ -622,7 +625,10 @@ class ElderBacktester:
         self.save_results(results, symbol)
 
         # Generate charts
-        self.generate_charts(df_5m, all_zones, symbol)
+        try:
+            self.generate_charts(df_5m, all_zones, symbol)
+        except Exception as e:
+            print(f"Chart generation failed (non-fatal): {e}")
 
         print("\n" + "="*50)
         print("BACKTEST COMPLETED")

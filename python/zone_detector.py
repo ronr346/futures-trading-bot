@@ -83,8 +83,8 @@ class ZoneDetector:
 
     def __init__(
         self,
-        explosive_threshold: float = 1.5,  # ATR multiplier for explosive moves
-        consolidation_threshold: float = 0.3,  # ATR multiplier for consolidation
+        explosive_threshold: float = 0.7,  # ATR multiplier for explosive moves
+        consolidation_threshold: float = 0.8,  # ATR multiplier for consolidation
         min_base_candles: int = 1,  # Minimum candles in base
         max_base_candles: int = 5,  # Maximum candles in base
         atr_period: int = 14
@@ -276,75 +276,63 @@ class ZoneDetector:
         start_idx = max(0, len(df) - lookback)
 
         i = start_idx + self.atr_period
-        while i < len(df) - 3:  # Need at least 3 candles ahead to detect pattern
+        while i < len(df) - 2:  # Need at least 2 candles ahead
 
-            # Pattern 1: Rally-Base-Drop (Supply Zone)
-            # Look for explosive move up, then consolidation, then explosive move down
+            # Check if current candle is explosive
+            is_exp, exp_dir = self.is_explosive_move(df, i, atr)
 
-            if i >= 2:  # Need previous candles
-                explosive_up, up_dir = self.is_explosive_move(df, i-2, atr)
+            if is_exp:
+                # Pattern 1: Rally-Base-Drop (Supply Zone)
+                # Current candle is explosive UP → look for base → then explosive DOWN
+                if exp_dir == "up":
+                    base_start = i + 1
+                    base_end = -1
 
-                if explosive_up and up_dir == "up":
-                    # Found explosive move up, now look for consolidation
-                    base_start = i - 1
-                    base_end = i - 1
-                    base_found = False
-
-                    # Look for consolidation candles after the rally
-                    for j in range(i-1, min(i + self.max_base_candles, len(df) - 1)):
+                    for j in range(i + 1, min(i + 1 + self.max_base_candles, len(df))):
                         if self.is_consolidation_candle(df, j, atr):
                             base_end = j
-                            base_found = True
                         else:
-                            break  # Consolidation ended
+                            break
 
-                    # Check if we have enough base candles
-                    if base_found and (base_end - base_start + 1) >= self.min_base_candles:
-                        # Now look for explosive move down after the base
-                        if base_end + 1 < len(df):
-                            explosive_down, down_dir = self.is_explosive_move(df, base_end + 1, atr)
-
-                            if explosive_down and down_dir == "down":
-                                # Found complete RBD pattern - create supply zone
+                    if base_end >= base_start and (base_end - base_start + 1) >= self.min_base_candles:
+                        # Look for explosive move down after base
+                        next_idx = base_end + 1
+                        if next_idx < len(df):
+                            exp_down, down_dir = self.is_explosive_move(df, next_idx, atr)
+                            if exp_down and down_dir == "down":
                                 base_indices = list(range(base_start, base_end + 1))
                                 supply_zone = self.create_supply_zone(df, base_indices, timeframe)
-
                                 if supply_zone and supply_zone.height > 0:
                                     zones.append(supply_zone)
+                                    i = next_idx + 1
+                                    continue
 
-            # Pattern 2: Drop-Base-Rally (Demand Zone)
-            # Look for explosive move down, then consolidation, then explosive move up
+                # Pattern 2: Drop-Base-Rally (Demand Zone)  
+                # Current candle is explosive DOWN → look for base → then explosive UP
+                if exp_dir == "down":
+                    base_start = i + 1
+                    base_end = -1
 
-            if i >= 2:  # Need previous candles
-                explosive_down, down_dir = self.is_explosive_move(df, i-2, atr)
-
-                if explosive_down and down_dir == "down":
-                    # Found explosive move down, now look for consolidation
-                    base_start = i - 1
-                    base_end = i - 1
-                    base_found = False
-
-                    # Look for consolidation candles after the drop
-                    for j in range(i-1, min(i + self.max_base_candles, len(df) - 1)):
+                    for j in range(i + 1, min(i + 1 + self.max_base_candles, len(df))):
                         if self.is_consolidation_candle(df, j, atr):
                             base_end = j
-                            base_found = True
                         else:
-                            break  # Consolidation ended
+                            break
 
-                    # Check if we have enough base candles
-                    if base_found and (base_end - base_start + 1) >= self.min_base_candles:
-                        # Now look for explosive move up after the base
-                        if base_end + 1 < len(df):
-                            explosive_up, up_dir = self.is_explosive_move(df, base_end + 1, atr)
+                    if base_end >= base_start and (base_end - base_start + 1) >= self.min_base_candles:
+                        next_idx = base_end + 1
+                        if next_idx < len(df):
+                            exp_up, up_dir = self.is_explosive_move(df, next_idx, atr)
 
-                            if explosive_up and up_dir == "up":
+                            if exp_up and up_dir == "up":
                                 # Found complete DBR pattern - create demand zone
                                 base_indices = list(range(base_start, base_end + 1))
                                 demand_zone = self.create_demand_zone(df, base_indices, timeframe)
 
                                 if demand_zone and demand_zone.height > 0:
                                     zones.append(demand_zone)
+                                    i = next_idx + 1
+                                    continue
 
             i += 1
 
