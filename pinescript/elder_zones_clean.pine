@@ -1,0 +1,162 @@
+// Elder Santis Supply & Demand Zone Visualization
+// Clean indicator-only version — no strategy, no backtesting
+//@version=6
+indicator("Elder S&D Zones", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+// Display toggles
+show_zones       = input.bool(true, "Show S&D Zones",           group="Display")
+show_structure   = input.bool(true, "Show Market Structure",     group="Display")
+show_volume      = input.bool(true, "Show Volume Analysis",      group="Display")
+show_vwap        = input.bool(true, "Show VWAP",                 group="Display")
+show_trend_bg    = input.bool(true, "Show Trend Background",     group="Display")
+
+// Zone detection
+zone_lookback            = input.int(20,   "Zone Lookback",                  minval=10,  maxval=100, group="Zone Detection")
+explosive_move_threshold = input.float(1.5, "Explosive Move (ATR x)",        minval=1.0, maxval=3.0, group="Zone Detection")
+consolidation_threshold  = input.float(0.3, "Consolidation (ATR x)",         minval=0.1, maxval=1.0, group="Zone Detection")
+
+// Volume
+volume_ma_length = input.int(20, "Volume MA Length", minval=5, maxval=50, group="Volume")
+
+// Trend
+trend_ema_length = input.int(50, "Trend EMA Length", minval=10, maxval=200, group="Trend")
+
+// ═══════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════
+
+atr        = ta.atr(14)
+vwap_val   = ta.vwap(close)
+ema_trend  = ta.ema(close, trend_ema_length)
+volume_ma  = ta.sma(volume, volume_ma_length)
+
+// Trend direction: 1 bullish, -1 bearish, 0 neutral
+trend_direction = close > ema_trend ? 1 : close < ema_trend ? -1 : 0
+
+// Swing detection (5-bar pivots)
+swing_high = ta.pivothigh(high, 5, 5)
+swing_low  = ta.pivotlow(low, 5, 5)
+
+// CVD approximation
+price_volume_delta = close > open ? volume : -volume
+cvd    = ta.cum(price_volume_delta)
+
+// ═══════════════════════════════════════════════════════════════
+// SUPPLY & DEMAND ZONE DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+is_consolidation(i) =>
+    (high[i] - low[i]) < atr[i] * consolidation_threshold
+
+is_explosive(i) =>
+    (high[i] - low[i]) > atr[i] * explosive_move_threshold
+
+// Arrays for live zone boxes
+var box[] supply_zones = array.new<box>()
+var box[] demand_zones = array.new<box>()
+
+// Pre-compute outside local scopes
+explosive_0       = is_explosive(0)
+explosive_2       = is_explosive(2)
+consolidation_1   = is_consolidation(1)
+zone_highest_high = ta.highest(high, zone_lookback)
+zone_lowest_high  = ta.lowest(high, zone_lookback)
+zone_highest_low  = ta.highest(low, zone_lookback)
+zone_lowest_low   = ta.lowest(low, zone_lookback)
+
+// State vars for pattern tracking
+var int  base_start_s       = na
+var bool in_consol_s        = false
+var bool found_rally        = false
+
+var int  base_start_d       = na
+var bool in_consol_d        = false
+var bool found_drop         = false
+
+if barstate.isconfirmed and bar_index > zone_lookback + 10
+
+    // --- Supply zones (Rally-Base-Drop) ---
+    if explosive_2 and close[2] > open[2]
+        found_rally  := true
+        in_consol_s  := false
+        base_start_s := na
+
+    if found_rally and consolidation_1 and not in_consol_s
+        base_start_s := bar_index - 1
+        in_consol_s  := true
+
+    if in_consol_s and explosive_0 and close < open and not na(base_start_s)
+        if show_zones
+            zone_top    = zone_highest_high
+            zone_bottom = zone_lowest_high
+            array.push(supply_zones, box.new(base_start_s, zone_top, bar_index + 20, zone_bottom, bgcolor=color.new(color.red, 85), border_color=color.red, border_width=1))
+        found_rally  := false
+        in_consol_s  := false
+        base_start_s := na
+
+    // --- Demand zones (Drop-Base-Rally) ---
+    if explosive_2 and close[2] < open[2]
+        found_drop   := true
+        in_consol_d  := false
+        base_start_d := na
+
+    if found_drop and consolidation_1 and not in_consol_d
+        base_start_d := bar_index - 1
+        in_consol_d  := true
+
+    if in_consol_d and explosive_0 and close > open and not na(base_start_d)
+        if show_zones
+            zone_top    = zone_highest_low
+            zone_bottom = zone_lowest_low
+            array.push(demand_zones, box.new(base_start_d, zone_top, bar_index + 20, zone_bottom, bgcolor=color.new(color.green, 85), border_color=color.green, border_width=1))
+        found_drop   := false
+        in_consol_d  := false
+        base_start_d := na
+
+// ═══════════════════════════════════════════════════════════════
+// STRUCTURE SHIFT DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+prev_swing_low_val  = ta.valuewhen(not na(swing_low),  low,  1)
+prev_swing_high_val = ta.valuewhen(not na(swing_high), high, 1)
+
+bullish_shift = low  > prev_swing_low_val  and close > open
+bearish_shift = high < prev_swing_high_val and close < open
+
+plotshape(show_structure and bullish_shift, style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, title="Bullish Structure Shift")
+plotshape(show_structure and bearish_shift, style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, title="Bearish Structure Shift")
+
+// ═══════════════════════════════════════════════════════════════
+// VOLUME ANALYSIS — ABSORPTION DETECTION
+// ═══════════════════════════════════════════════════════════════
+
+price_new_high = high > ta.highest(high, 10)[1]
+price_new_low  = low  < ta.lowest(low,   10)[1]
+cvd_new_high   = cvd  > ta.highest(cvd,  10)[1]
+cvd_new_low    = cvd  < ta.lowest(cvd,   10)[1]
+
+bullish_absorption = price_new_low  and not cvd_new_low
+bearish_absorption = price_new_high and not cvd_new_high
+
+plotshape(show_volume and bullish_absorption, style=shape.circle, location=location.belowbar, color=color.blue,   size=size.tiny, title="Bullish Absorption")
+plotshape(show_volume and bearish_absorption, style=shape.circle, location=location.abovebar, color=color.orange, size=size.tiny, title="Bearish Absorption")
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════
+
+plot(show_vwap ? vwap_val : na, color=color.yellow, linewidth=2, title="VWAP")
+bgcolor(show_trend_bg ? (trend_direction == 1 ? color.new(color.green, 95) : trend_direction == -1 ? color.new(color.red, 95) : na) : na, title="Trend Background")
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+
+alertcondition(bullish_shift,      title="Bullish Structure Shift", message="Bullish structure shift detected")
+alertcondition(bearish_shift,      title="Bearish Structure Shift", message="Bearish structure shift detected")
+alertcondition(bullish_absorption, title="Bullish Absorption",      message="Bullish absorption — price new low, CVD diverging")
+alertcondition(bearish_absorption, title="Bearish Absorption",      message="Bearish absorption — price new high, CVD diverging")

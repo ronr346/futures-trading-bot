@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# Secrets
+*.key
+*.secret
+config_local.py
+credentials.json
+
+# Logs
+*.log
+results/log.txt
+results/log2.txt
+results/output.txt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
