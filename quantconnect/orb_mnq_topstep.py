@@ -1,4 +1,4 @@
-# ORB (Opening Range Breakout) Strategy — MNQ Micro E-mini Futures
+# ORB (Opening Range Breakout) Strategy - MNQ Micro E-mini Futures
 # QuantConnect LEAN Python | MNQ Futures 5M
 # Long-only ORB with 200-day EMA trend filter, one trade per day
 # Adapted for TopStep $50K Combine compliance:
@@ -6,7 +6,7 @@
 #   - Dynamic position sizing based on trailing drawdown cushion
 #   - Monthly profit lock at $3,000
 #
-# READY TO RUN — paste into QuantConnect and hit Build & Backtest
+# READY TO RUN - paste into QuantConnect and hit Build & Backtest
 
 from AlgorithmImports import *
 from collections import defaultdict
@@ -54,14 +54,14 @@ class TopStepRiskManager:
         Dynamic position sizing based on cushion from DD level.
 
         Logic:
-        - Far from danger (cushion > $1,500) → press the gas → 10 MNQ
-        - Safe zone (cushion $1,000-$1,500)  → 7 MNQ
-        - Moderate (cushion $600-$1,000)     → 5 MNQ
-        - Caution (cushion $300-$600)        → 3 MNQ
-        - Danger (cushion $200-$300)         → 1 MNQ (minimal)
-        - Too close (cushion < $200)         → 0 (do not trade)
+        - Far from danger (cushion > $1,500) -> press the gas -> 10 MNQ
+        - Safe zone (cushion $1,000-$1,500)  -> 7 MNQ
+        - Moderate (cushion $600-$1,000)     -> 5 MNQ
+        - Caution (cushion $300-$600)        -> 3 MNQ
+        - Danger (cushion $200-$300)         -> 1 MNQ (minimal)
+        - Too close (cushion < $200)         -> 0 (do not trade)
 
-        Note: 10 MNQ ≈ 1 full NQ contract in dollar exposure.
+        Note: 10 MNQ ~= 1 full NQ contract in dollar exposure.
         """
         c = self.cushion(equity)
         if   c > 1500: return 10
@@ -85,7 +85,7 @@ class TopStepRiskManager:
         self.monthly_pnl[month_key] += pnl
 
     def is_month_locked(self, month_key: str) -> bool:
-        """Return True if we've hit $3,000 profit this month → stop trading."""
+        """Return True if we've hit $3,000 profit this month -> stop trading."""
         return self.monthly_pnl.get(month_key, 0.0) >= self.MONTHLY_LOCK
 
     def get_monthly_summary(self) -> dict:
@@ -109,7 +109,7 @@ class ORBMNQTopStep(QCAlgorithm):
         self.SetCash(50000)
         self.SetTimeZone("America/New_York")
 
-        # ── MNQ Continuous Futures (1-min data, consolidated to 5M) ───
+        # -- MNQ Continuous Futures (1-min data, consolidated to 5M) ---
         self.mnq = self.AddFuture(
             Futures.Indices.MicroNASDAQ100EMini,
             Resolution.Minute,
@@ -120,7 +120,7 @@ class ORBMNQTopStep(QCAlgorithm):
         self.mnq.SetFilter(0, 90)
         self.symbol = None
 
-        # ── Strategy Parameters ──────────────────────────────────────
+        # -- Strategy Parameters --------------------------------------
         self.ORB_START        = time(9, 30)
         self.ORB_END          = time(9, 45)
         self.EOD_EXIT_TIME    = time(15, 45)
@@ -129,7 +129,7 @@ class ORBMNQTopStep(QCAlgorithm):
         self.TARGET_MULT      = 0.50        # profit target = 50% of ORB range
         self.EMA_PERIOD       = 200
 
-        # ── ORB State (reset every trading day) ──────────────────────
+        # -- ORB State (reset every trading day) ----------------------
         self.orb_high         = None
         self.orb_low          = None
         self.orb_open_price   = None
@@ -139,19 +139,19 @@ class ORBMNQTopStep(QCAlgorithm):
         self.entry_bar_time   = None        # timestamp of breakout bar
         self.last_trade_day   = None
 
-        # ── Trade Management ─────────────────────────────────────────
+        # -- Trade Management -----------------------------------------
         self.entry_price      = None
         self.stop_price       = None
         self.target_price     = None
 
-        # ── Daily 200-period EMA ─────────────────────────────────────
+        # -- Daily 200-period EMA -------------------------------------
         self.daily_closes_buf = []          # buffer until we have 200 closes
         self.daily_ema        = None
         self.last_daily_close = None
         self.last_daily_date  = None
         self.trend_bullish    = False
 
-        # ── Trade Statistics ─────────────────────────────────────────
+        # -- Trade Statistics -----------------------------------------
         self.total_trades     = 0
         self.winning_trades   = 0
         self.losing_trades    = 0
@@ -163,26 +163,26 @@ class ORBMNQTopStep(QCAlgorithm):
         # TopStep Risk Manager
         self.risk_mgr = TopStepRiskManager(starting_equity=50000.0)
 
-        # ── Consolidator tracking (contract → consolidator) ──────────
+        # -- Consolidator tracking (contract -> consolidator) ----------
         self.consolidators    = {}
 
-        # ── Schedule EOD exit at 15:45 ET ────────────────────────────
+        # -- Schedule EOD exit at 15:45 ET ----------------------------
         self.Schedule.On(
             self.DateRules.EveryDay(),
             self.TimeRules.At(15, 45),
             self._eod_exit
         )
 
-        # ── Warmup 300 calendar days (~200+ trading days for EMA) ────
+        # -- Warmup 300 calendar days (~200+ trading days for EMA) ----
         self.SetWarmUp(timedelta(days=300))
 
-        self.Debug("ORB MNQ TopStep Strategy initialized — MNQ 5M, $50K, Long Only")
+        self.Debug("ORB MNQ TopStep Strategy initialized - MNQ 5M, $50K, Long Only")
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  MAIN DATA HANDLER  (fires every 1-minute bar)
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def OnData(self, data: Slice):
-        # ── Get front-month contract from futures chain ──────────────
+        # -- Get front-month contract from futures chain --------------
         chain = data.FutureChains.get(self.mnq.Symbol)
         if chain is None:
             return
@@ -192,14 +192,14 @@ class ORBMNQTopStep(QCAlgorithm):
 
         contract_symbol = contracts[0].Symbol
 
-        # ── Track daily closes for 200 EMA (always, even warmup) ─────
+        # -- Track daily closes for 200 EMA (always, even warmup) -----
         if data.Bars.ContainsKey(contract_symbol):
             self._track_daily_close(float(data.Bars[contract_symbol].Close))
 
         if self.IsWarmingUp:
             return
 
-        # ── Register 5-min consolidator when contract rolls ──────────
+        # -- Register 5-min consolidator when contract rolls ----------
         if contract_symbol not in self.consolidators:
             for old_sym, old_con in list(self.consolidators.items()):
                 self.SubscriptionManager.RemoveConsolidator(old_sym, old_con)
@@ -216,10 +216,10 @@ class ORBMNQTopStep(QCAlgorithm):
 
         bar = data.Bars[self.symbol]
 
-        # ── Track ORB high/low on 1-minute bars for accuracy ─────────
+        # -- Track ORB high/low on 1-minute bars for accuracy ---------
         self._track_orb(bar)
 
-        # ── Execute pending entry (next bar after breakout signal) ────
+        # -- Execute pending entry (next bar after breakout signal) ----
         if (self.entry_bar_time is not None
                 and self.Time > self.entry_bar_time
                 and not self.Portfolio[self.symbol].Invested
@@ -228,22 +228,22 @@ class ORBMNQTopStep(QCAlgorithm):
             self.entry_bar_time = None
             self._execute_entry()
 
-        # ── Check stop / target on every 1-min bar ───────────────────
+        # -- Check stop / target on every 1-min bar -------------------
         if self.Portfolio[self.symbol].Invested:
             self._check_exit_minute(bar)
 
-        # ── Drawdown tracking on every bar while invested ────────────
+        # -- Drawdown tracking on every bar while invested ------------
         self._update_drawdown()
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  ORB TRACKING  (called on every 1-minute bar)
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def _track_orb(self, bar):
         """Accumulate high/low during the 9:30-9:45 ET opening range."""
         today = self.Time.date()
         now   = self.Time.time()
 
-        # ── Daily reset ──────────────────────────────────────────────
+        # -- Daily reset ----------------------------------------------
         if self.last_trade_day != today:
             self.last_trade_day = today
             self.orb_high       = None
@@ -257,7 +257,7 @@ class ORBMNQTopStep(QCAlgorithm):
             self.stop_price     = None
             self.target_price   = None
 
-        # ── Accumulate during ORB window (9:30 <= t < 9:45) ──────────
+        # -- Accumulate during ORB window (9:30 <= t < 9:45) ----------
         if self.ORB_START <= now < self.ORB_END:
             h = float(bar.High)
             l = float(bar.Low)
@@ -269,7 +269,7 @@ class ORBMNQTopStep(QCAlgorithm):
                 self.orb_high = max(self.orb_high, h)
                 self.orb_low  = min(self.orb_low, l)
 
-        # ── Finalize ORB once the window closes ──────────────────────
+        # -- Finalize ORB once the window closes ----------------------
         if now >= self.ORB_END and not self.orb_defined and self.orb_high is not None:
             self.orb_defined = True
             orb_range = self.orb_high - self.orb_low
@@ -279,16 +279,16 @@ class ORBMNQTopStep(QCAlgorithm):
             if orb_pct > self.ORB_SIZE_LIMIT:
                 self.orb_skip_day = True
                 self.Debug(
-                    f"{today} ORB SKIP — range {orb_range:.2f} pts "
+                    f"{today} ORB SKIP - range {orb_range:.2f} pts "
                     f"({orb_pct * 100:.2f}%) > 0.8% limit")
             else:
                 self.Debug(
-                    f"{today} ORB SET — H={self.orb_high:.2f}  "
+                    f"{today} ORB SET - H={self.orb_high:.2f}  "
                     f"L={self.orb_low:.2f}  Range={orb_range:.2f}")
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  DAILY 200 EMA
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def _track_daily_close(self, close):
         """Record the last close of each calendar day for EMA updates."""
         today = self.Time.date()
@@ -299,7 +299,7 @@ class ORBMNQTopStep(QCAlgorithm):
             return
 
         if today != self.last_daily_date:
-            # New calendar day → commit previous day's final close
+            # New calendar day -> commit previous day's final close
             self._update_daily_ema(self.last_daily_close)
             self.last_daily_date = today
 
@@ -320,9 +320,9 @@ class ORBMNQTopStep(QCAlgorithm):
             self.daily_ema = close * k + self.daily_ema * (1 - k)
             self.trend_bullish = close > self.daily_ema
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  5-MINUTE BAR HANDLER  (breakout / downside-break detection)
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def OnFiveMinuteBar(self, sender, bar):
         """Detect ORB breakout or downside break on each 5-min close."""
         if self.IsWarmingUp or self.symbol is None:
@@ -341,25 +341,25 @@ class ORBMNQTopStep(QCAlgorithm):
         if now <= self.ORB_END:
             return
 
-        # Rule 5 & 9 — downside break first → done for the day
+        # Rule 5 & 9 - downside break first -> done for the day
         if close < self.orb_low:
             self.orb_skip_day = True
             self.traded_today = True
             self.Debug(
                 f"{self.Time.date()} ORB DOWNSIDE BREAK at {close:.2f} "
-                f"< ORB low {self.orb_low:.2f} — day skipped")
+                f"< ORB low {self.orb_low:.2f} - day skipped")
             return
 
-        # Rule 4 — 5-min candle closes above ORB high → entry next bar
+        # Rule 4 - 5-min candle closes above ORB high -> entry next bar
         if close > self.orb_high:
             self.entry_bar_time = self.Time
             self.Debug(
-                f"{self.Time.date()} ORB BREAKOUT SIGNAL — close {close:.2f} "
+                f"{self.Time.date()} ORB BREAKOUT SIGNAL - close {close:.2f} "
                 f"> ORB high {self.orb_high:.2f}")
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  ENTRY EXECUTION
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def _execute_entry(self):
         """Place a long market order with dynamic MNQ contract sizing.
         Stop & target are set in OnOrderEvent once the fill arrives."""
@@ -371,13 +371,13 @@ class ORBMNQTopStep(QCAlgorithm):
         # Check monthly lock
         month_key = self.Time.strftime("%Y-%m")
         if self.risk_mgr.is_month_locked(month_key):
-            self.Debug(f"{self.Time.date()} MONTH LOCKED — ${self.risk_mgr.monthly_pnl.get(month_key,0):,.0f} profit this month, no more trades")
+            self.Debug(f"{self.Time.date()} MONTH LOCKED - ${self.risk_mgr.monthly_pnl.get(month_key,0):,.0f} profit this month, no more trades")
             self.traded_today = True
             return
 
         # Check cushion (too close to trailing DD)
         if not self.risk_mgr.can_trade(equity):
-            self.Debug(f"{self.Time.date()} DD PROTECTION — cushion ${self.risk_mgr.cushion(equity):,.0f} too small, skipping")
+            self.Debug(f"{self.Time.date()} DD PROTECTION - cushion ${self.risk_mgr.cushion(equity):,.0f} too small, skipping")
             self.traded_today = True
             return
 
@@ -392,9 +392,9 @@ class ORBMNQTopStep(QCAlgorithm):
         self.total_trades += 1
         self.Debug(f"{self.Time.date()} ENTRY {contracts} MNQ | cushion=${self.risk_mgr.cushion(equity):,.0f}")
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  EXIT CHECKS  (1-minute granularity)
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def _check_exit_minute(self, bar):
         """Check stop loss and take profit on every 1-minute bar."""
         if not self.Portfolio[self.symbol].Invested:
@@ -405,7 +405,7 @@ class ORBMNQTopStep(QCAlgorithm):
         low  = float(bar.Low)
         high = float(bar.High)
 
-        # Check stop first (conservative — assume worst case)
+        # Check stop first (conservative - assume worst case)
         if low <= self.stop_price:
             self._close_position("STOP HIT", is_win=False)
             return
@@ -414,7 +414,7 @@ class ORBMNQTopStep(QCAlgorithm):
             self._close_position("TARGET HIT", is_win=True)
 
     def _eod_exit(self):
-        """Scheduled EOD exit at 15:45 ET — force close any open position."""
+        """Scheduled EOD exit at 15:45 ET - force close any open position."""
         if self.IsWarmingUp:
             return
         if self.symbol is None:
@@ -459,9 +459,9 @@ class ORBMNQTopStep(QCAlgorithm):
         self.stop_price   = None
         self.target_price = None
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  DRAWDOWN TRACKING
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def _update_drawdown(self):
         """Update peak equity and max drawdown on every bar."""
         equity = float(self.Portfolio.TotalPortfolioValue)
@@ -474,16 +474,16 @@ class ORBMNQTopStep(QCAlgorithm):
 
         self.risk_mgr.update_peak(float(self.Portfolio.TotalPortfolioValue))
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  ORDER EVENTS
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def OnOrderEvent(self, orderEvent):
         if orderEvent.Status != OrderStatus.Filled:
             return
 
         fill_price = float(orderEvent.FillPrice)
 
-        # ── Entry fill → compute stop & target from actual fill ──────
+        # -- Entry fill -> compute stop & target from actual fill ------
         if (orderEvent.Direction == OrderDirection.Buy
                 and self.orb_high is not None
                 and self.orb_low is not None
@@ -511,9 +511,9 @@ class ORBMNQTopStep(QCAlgorithm):
             f"Qty:{orderEvent.FillQuantity} | "
             f"Price:{fill_price:.2f}")
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  END-OF-BACKTEST STATISTICS
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     def OnEndOfAlgorithm(self):
         equity = float(self.Portfolio.TotalPortfolioValue)
         net    = float(self.Portfolio.TotalNetProfit)
@@ -541,7 +541,7 @@ class ORBMNQTopStep(QCAlgorithm):
                 current = 0
 
         self.Log("=" * 60)
-        self.Log("ORB MNQ TOPSTEP STRATEGY — FINAL RESULTS")
+        self.Log("ORB MNQ TOPSTEP STRATEGY - FINAL RESULTS")
         self.Log("=" * 60)
         self.Log(f"Total Portfolio Value:    ${equity:,.0f}")
         self.Log(f"Total Net P&L:           ${net:,.0f}")
@@ -571,13 +571,13 @@ class ORBMNQTopStep(QCAlgorithm):
         self.Log(f"Final DD Level:          ${self.risk_mgr.dd_level():,.0f}")
         self.Log(f"Final Cushion:           ${self.risk_mgr.cushion(equity):,.0f}")
         locked_months = [m for m, p in self.risk_mgr.monthly_pnl.items() if p >= 3000]
-        self.Log(f"Months hit $3K lock:     {len(locked_months)} → {locked_months}")
+        self.Log(f"Months hit $3K lock:     {len(locked_months)} -> {locked_months}")
         self.Log("=" * 60)
         self.Log("MONTHLY P&L (TopStep Risk Manager)")
         self.Log("-" * 40)
         for month in sorted(self.risk_mgr.monthly_pnl.keys()):
             pnl = self.risk_mgr.monthly_pnl[month]
-            locked = " 🔒 LOCKED" if pnl >= 3000 else ""
+            locked = " [LOCKED]" if pnl >= 3000 else ""
             marker = "+" if pnl >= 0 else "-"
             self.Log(f"  {month}:  {marker}${abs(pnl):>8,.0f}{locked}")
         self.Log("=" * 60)
