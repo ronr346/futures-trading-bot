@@ -1,11 +1,122 @@
-# ORB (Opening Range Breakout) Strategy — NQ E-mini Futures
-# QuantConnect LEAN Python | NQ Futures 5M
+# ORB (Opening Range Breakout) Strategy — NQ Micro Futures (MNQ)
+# QuantConnect LEAN Python | MNQ Futures 5M
 # Long-only ORB with 200-day EMA trend filter, one trade per day
+# Apex Trader Funding rules: ApexRiskManager (no daily limit, EOD trailing DD $2,500)
 #
-# READY TO RUN — paste into QuantConnect and hit Build & Backtest
+# Updated: 2026-02-25 — NQ→MNQ, TopStep→ApexRiskManager, dynamic sizing
 
 from AlgorithmImports import *
 from collections import defaultdict
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ApexRiskManager — Inlined (no external module needed for QuantConnect)
+# ═══════════════════════════════════════════════════════════════════
+class ApexRiskManager:
+    """
+    Apex Trader Funding risk manager for QuantConnect LEAN strategies.
+    Instantiate in Initialize(), call methods at entry and EOD.
+    """
+
+    def __init__(self, algorithm, start_equity=50000,
+                 profit_target=3000, dd_buffer=2500, monthly_lock=3000):
+        self.algo           = algorithm
+        self.start_equity   = start_equity
+        self.profit_target  = profit_target
+        self.dd_buffer      = dd_buffer          # Apex: $2,500
+        self.monthly_lock   = monthly_lock       # stop month at $3,000
+
+        # Trailing DD floor (only moves up, never down)
+        self.peak_equity    = float(start_equity)
+        self.dd_floor       = float(start_equity) - dd_buffer  # $47,500
+        self.dd_locked      = False              # True when floor stops moving
+
+        # Monthly P&L tracking
+        self.monthly_pnl    = {}                 # "YYYY-MM" -> float
+
+        # Consistency cap: 30% of profit_target per day
+        self.daily_cap      = profit_target * 0.30   # $900
+
+    def update_equity(self, current_equity):
+        """Update peak equity and DD floor (intraday, for monitoring)."""
+        if current_equity > self.peak_equity:
+            self.peak_equity = current_equity
+            if not self.dd_locked:
+                new_floor = self.peak_equity - self.dd_buffer
+                if new_floor > self.dd_floor:
+                    self.dd_floor = new_floor
+        if not self.dd_locked and self.dd_floor >= self.start_equity:
+            self.dd_locked = True
+            self.algo.Debug(
+                f"ApexRM: DD floor LOCKED at ${self.dd_floor:,.0f} "
+                f"(equity ${self.peak_equity:,.0f})")
+
+    def record_eod(self, eod_equity, month_key):
+        """EOD update: advance DD floor from EOD balance (Apex uses EOD)."""
+        self.update_equity(eod_equity)
+        if month_key not in self.monthly_pnl:
+            self.monthly_pnl[month_key] = 0.0
+
+    def add_trade_pnl(self, pnl, month_key):
+        """Record trade P&L for monthly tracking."""
+        if month_key not in self.monthly_pnl:
+            self.monthly_pnl[month_key] = 0.0
+        self.monthly_pnl[month_key] += pnl
+
+    def get_contract_size(self):
+        """Returns 0-3 contracts based on cushion from DD floor."""
+        equity  = float(self.algo.Portfolio.TotalPortfolioValue)
+        cushion = equity - self.dd_floor
+        if cushion > 1500:
+            return 3
+        elif cushion > 800:
+            return 2
+        elif cushion > 300:
+            return 1
+        else:
+            self.algo.Debug(
+                f"ApexRM: SKIP — cushion ${cushion:.0f} <= $300 "
+                f"(equity ${equity:,.0f}, floor ${self.dd_floor:,.0f})")
+            return 0
+
+    def check_monthly_lock(self, month_key):
+        """Returns True if monthly profit target already hit."""
+        monthly = self.monthly_pnl.get(month_key, 0.0)
+        if monthly >= self.monthly_lock:
+            self.algo.Debug(
+                f"ApexRM: MONTHLY LOCK — {month_key} P&L "
+                f"${monthly:,.0f} >= ${self.monthly_lock:,.0f}")
+            return True
+        return False
+
+    def check_daily_consistency(self, todays_pnl):
+        """Returns True if today's P&L >= daily_cap ($900)."""
+        if todays_pnl >= self.daily_cap:
+            self.algo.Debug(
+                f"ApexRM: DAILY CAP HIT — today P&L "
+                f"${todays_pnl:.0f} >= ${self.daily_cap:.0f}")
+            return True
+        return False
+
+    def should_trade(self, todays_pnl, month_key):
+        """Returns True only if ALL conditions allow trading."""
+        if self.check_monthly_lock(month_key):
+            return False
+        if self.check_daily_consistency(todays_pnl):
+            return False
+        if self.get_contract_size() == 0:
+            return False
+        return True
+
+    def log_status(self, month_key):
+        equity  = float(self.algo.Portfolio.TotalPortfolioValue)
+        cushion = equity - self.dd_floor
+        monthly = self.monthly_pnl.get(month_key, 0.0)
+        self.algo.Debug(
+            f"ApexRM Status | Equity: ${equity:,.0f} | "
+            f"Floor: ${self.dd_floor:,.0f} | Cushion: ${cushion:.0f} | "
+            f"Contracts: {self.get_contract_size()} | "
+            f"Month {month_key}: ${monthly:.0f}")
 
 
 class ORBNQStrategy(QCAlgorithm):
@@ -16,9 +127,9 @@ class ORBNQStrategy(QCAlgorithm):
         self.SetCash(50000)
         self.SetTimeZone("America/New_York")
 
-        # ── NQ Continuous Futures (1-min data, consolidated to 5M) ───
+        # ── MNQ Continuous Futures (1-min data, consolidated to 5M) ──
         self.nq = self.AddFuture(
-            Futures.Indices.NASDAQ100EMini,
+            "MNQ",
             Resolution.Minute,
             dataNormalizationMode=DataNormalizationMode.BackwardsRatio,
             dataMappingMode=DataMappingMode.LastTradingDay,
@@ -51,12 +162,12 @@ class ORBNQStrategy(QCAlgorithm):
         self.stop_price       = None
         self.target_price     = None
 
-        # ── Daily 200-period EMA ─────────────────────────────────────
-        self.daily_closes_buf = []          # buffer until we have 200 closes
-        self.daily_ema        = None
-        self.last_daily_close = None
-        self.last_daily_date  = None
-        self.trend_bullish    = False
+        # ── Daily 200-period EMA (built-in indicator) ────────────────
+        self.ema200 = self.EMA(self.nq.Symbol, 200, Resolution.Daily)
+
+        # ── Apex Risk Manager ────────────────────────────────────────
+        self.risk             = ApexRiskManager(self, start_equity=50000)
+        self.today_pnl        = 0.0         # resets each day
 
         # ── Trade Statistics ─────────────────────────────────────────
         self.total_trades     = 0
@@ -77,10 +188,10 @@ class ORBNQStrategy(QCAlgorithm):
             self._eod_exit
         )
 
-        # ── Warmup 300 calendar days (~200+ trading days for EMA) ────
-        self.SetWarmUp(timedelta(days=300))
+        # ── Warmup 210 calendar days (built-in EMA handles its own warmup) ──
+        self.SetWarmUp(timedelta(days=210))
 
-        self.Debug("ORB NQ Strategy initialized — NQ 5M, $50K, Long Only")
+        self.Debug("ORB NQ Strategy initialized — MNQ 5M, $50K, Long Only, ApexRM")
 
     # ══════════════════════════════════════════════════════════════════
     #  MAIN DATA HANDLER  (fires every 1-minute bar)
@@ -95,10 +206,6 @@ class ORBNQStrategy(QCAlgorithm):
             return
 
         contract_symbol = contracts[0].Symbol
-
-        # ── Track daily closes for 200 EMA (always, even warmup) ─────
-        if data.Bars.ContainsKey(contract_symbol):
-            self._track_daily_close(float(data.Bars[contract_symbol].Close))
 
         if self.IsWarmingUp:
             return
@@ -122,6 +229,11 @@ class ORBNQStrategy(QCAlgorithm):
 
         # ── Track ORB high/low on 1-minute bars for accuracy ─────────
         self._track_orb(bar)
+
+        # ── 15:30 cutoff — no new entries after this time ────────────
+        if self.Time.time() >= time(15, 30) and self.entry_bar_time is not None:
+            self.Debug(f"{self.Time} ENTRY CANCELLED — past 15:30 cutoff (overnight protection)")
+            self.entry_bar_time = None
 
         # ── Execute pending entry (next bar after breakout signal) ────
         if (self.entry_bar_time is not None
@@ -160,6 +272,7 @@ class ORBNQStrategy(QCAlgorithm):
             self.entry_price    = None
             self.stop_price     = None
             self.target_price   = None
+            self.today_pnl      = 0.0      # reset daily P&L for consistency check
 
         # ── Accumulate during ORB window (9:30 <= t < 9:45) ──────────
         if self.ORB_START <= now < self.ORB_END:
@@ -191,40 +304,6 @@ class ORBNQStrategy(QCAlgorithm):
                     f"L={self.orb_low:.2f}  Range={orb_range:.2f}")
 
     # ══════════════════════════════════════════════════════════════════
-    #  DAILY 200 EMA
-    # ══════════════════════════════════════════════════════════════════
-    def _track_daily_close(self, close):
-        """Record the last close of each calendar day for EMA updates."""
-        today = self.Time.date()
-
-        if self.last_daily_date is None:
-            self.last_daily_date  = today
-            self.last_daily_close = close
-            return
-
-        if today != self.last_daily_date:
-            # New calendar day → commit previous day's final close
-            self._update_daily_ema(self.last_daily_close)
-            self.last_daily_date = today
-
-        self.last_daily_close = close
-
-    def _update_daily_ema(self, close):
-        """Update the 200-period daily EMA (SMA seed then exponential)."""
-        if self.daily_ema is None:
-            self.daily_closes_buf.append(close)
-            if len(self.daily_closes_buf) >= self.EMA_PERIOD:
-                # Seed with SMA of first 200 daily closes
-                self.daily_ema = (sum(self.daily_closes_buf)
-                                  / len(self.daily_closes_buf))
-                self.trend_bullish = close > self.daily_ema
-                self.daily_closes_buf = []          # free memory
-        else:
-            k = 2.0 / (self.EMA_PERIOD + 1)
-            self.daily_ema = close * k + self.daily_ema * (1 - k)
-            self.trend_bullish = close > self.daily_ema
-
-    # ══════════════════════════════════════════════════════════════════
     #  5-MINUTE BAR HANDLER  (breakout / downside-break detection)
     # ══════════════════════════════════════════════════════════════════
     def OnFiveMinuteBar(self, sender, bar):
@@ -235,7 +314,7 @@ class ORBNQStrategy(QCAlgorithm):
             return
         if self.Portfolio[self.symbol].Invested:
             return
-        if not self.trend_bullish:
+        if not self.ema200.IsReady or float(bar.Close) <= self.ema200.Current.Value:
             return
 
         now   = self.Time.time()
@@ -265,14 +344,27 @@ class ORBNQStrategy(QCAlgorithm):
     #  ENTRY EXECUTION
     # ══════════════════════════════════════════════════════════════════
     def _execute_entry(self):
-        """Place a long market order (1 NQ contract).
+        """Place a long market order (dynamic MNQ contracts via ApexRiskManager).
         Stop & target are set in OnOrderEvent once the fill arrives."""
         if self.orb_high is None or self.orb_low is None:
             return
 
-        self.MarketOrder(self.symbol, 1)
+        month_key = self.Time.strftime("%Y-%m")
+
+        # ── Apex risk gate: monthly lock, daily cap, cushion check ───
+        if not self.risk.should_trade(self.today_pnl, month_key):
+            self.traded_today = True   # skip day — don't retry
+            return
+
+        contracts = self.risk.get_contract_size()
+        if contracts == 0:
+            self.traded_today = True
+            return
+
+        self.MarketOrder(self.symbol, contracts)
         self.traded_today  = True
         self.total_trades += 1
+        self.Debug(f"ENTRY: {contracts} MNQ contracts")
 
     # ══════════════════════════════════════════════════════════════════
     #  EXIT CHECKS  (1-minute granularity)
@@ -301,9 +393,12 @@ class ORBNQStrategy(QCAlgorithm):
             return
         if self.symbol is None:
             return
-        if not self.Portfolio[self.symbol].Invested:
-            return
-        self._close_position("EOD EXIT 15:45", is_win=None)
+        if self.Portfolio[self.symbol].Invested:
+            self._close_position("EOD EXIT 15:45", is_win=None)
+
+        # Record EOD equity for Apex trailing DD (EOD-based, not intraday)
+        month_key = self.Time.strftime("%Y-%m")
+        self.risk.record_eod(float(self.Portfolio.TotalPortfolioValue), month_key)
 
     def _close_position(self, reason, is_win=None):
         """Liquidate and record trade statistics."""
@@ -326,6 +421,10 @@ class ORBNQStrategy(QCAlgorithm):
         month_key = self.Time.strftime("%Y-%m")
         self.monthly_pnl[month_key] += pnl
 
+        # Update Apex risk manager
+        self.today_pnl += pnl
+        self.risk.add_trade_pnl(pnl, month_key)
+
         self.Liquidate(self.symbol)
 
         entry_str = f"{self.entry_price:.2f}" if self.entry_price else "N/A"
@@ -342,7 +441,7 @@ class ORBNQStrategy(QCAlgorithm):
     #  DRAWDOWN TRACKING
     # ══════════════════════════════════════════════════════════════════
     def _update_drawdown(self):
-        """Update peak equity and max drawdown on every bar."""
+        """Update peak equity, max drawdown, and Apex risk manager on every bar."""
         equity = float(self.Portfolio.TotalPortfolioValue)
         if equity > self.peak_equity:
             self.peak_equity = equity
@@ -350,6 +449,8 @@ class ORBNQStrategy(QCAlgorithm):
             dd = (self.peak_equity - equity) / self.peak_equity
             if dd > self.max_drawdown:
                 self.max_drawdown = dd
+        # Keep Apex RM in sync (intraday monitoring)
+        self.risk.update_equity(equity)
 
     # ══════════════════════════════════════════════════════════════════
     #  ORDER EVENTS
